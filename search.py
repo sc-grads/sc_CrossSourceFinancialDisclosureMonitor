@@ -6,7 +6,12 @@ from normalizer import normalize
 
 load_dotenv()  # loads .env from project root if you run from root
 
-SQL = """
+
+# -------------------------
+# STEP 3.8: Grouped Search
+# -------------------------
+
+SQL_TOP_CLAIM = """
 WITH input_tokens AS (
   SELECT unnest(string_to_array(%s, ' ')) AS tok
 ),
@@ -27,20 +32,45 @@ overlap AS (
   GROUP BY ct.claim_id, ct.normalized_terms
 )
 SELECT
-  o.overlap_count,
+  normalized_terms,
+  overlap_count
+FROM overlap
+WHERE overlap_count >= %s
+ORDER BY overlap_count DESC
+LIMIT 1;
+"""
+
+SQL_SUPPORT = """
+WITH totals AS (
+  SELECT COUNT(*)::numeric AS total_sources FROM sources
+),
+support AS (
+  SELECT COUNT(DISTINCT a.source_id)::numeric AS sources_supporting
+  FROM claims c
+  JOIN articles a ON a.article_id = c.article_id
+  WHERE c.normalized_terms = %s
+)
+SELECT
+  support.sources_supporting,
+  totals.total_sources,
+  ROUND(support.sources_supporting / totals.total_sources, 3) AS support_ratio
+FROM support, totals;
+"""
+
+SQL_EVIDENCE = """
+SELECT
   s.source_name,
   a.institution,
   a.title,
   a.url,
   a.published_at
-FROM overlap o
-JOIN claims   c ON c.claim_id = o.claim_id
+FROM claims c
 JOIN articles a ON a.article_id = c.article_id
 JOIN sources  s ON s.source_id = a.source_id
-WHERE o.overlap_count >= %s
-ORDER BY o.overlap_count DESC, a.published_at DESC
-LIMIT %s;
+WHERE c.normalized_terms = %s
+ORDER BY a.published_at DESC;
 """
+
 
 def get_conn():
     dbname = os.getenv("DB_NAME")
@@ -68,51 +98,78 @@ def get_conn():
         port=port
     )
 
-def search_by_title(user_input: str, min_overlap: int = 3, limit: int = 10):
+
+def search_grouped(user_input: str, min_overlap: int = 3):
+    """
+    1) Normalize the user input
+    2) Find the best-matching claim by overlap score
+    3) Compute sources_supporting + support_ratio
+    4) Return supporting evidence articles
+    """
     normalized_input = normalize(user_input)
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(SQL, (normalized_input, min_overlap, limit))
-            rows = cur.fetchall()
+            # 1) Find best claim match
+            cur.execute(SQL_TOP_CLAIM, (normalized_input, min_overlap))
+            top = cur.fetchone()
 
-    return normalized_input, rows
+            if not top:
+                return {
+                    "user_input": user_input,
+                    "normalized_input": normalized_input,
+                    "match_found": False,
+                    "message": f"No claim found with overlap >= {min_overlap}",
+                    "evidence": []
+                }
 
-def rows_to_dicts(rows):
-    """
-    Convert raw DB tuples into JSON-friendly dictionaries.
-    This is what your extension/API will consume.
-    """
-    results = []
-    for overlap_count, source_name, institution, title, url, published_at in rows:
-        results.append({
-            "overlap_count": int(overlap_count),
+            matched_claim, best_overlap = top
+
+            # 2) Compute support ratio
+            cur.execute(SQL_SUPPORT, (matched_claim,))
+            sources_supporting, total_sources, support_ratio = cur.fetchone()
+
+            # 3) Fetch evidence articles
+            cur.execute(SQL_EVIDENCE, (matched_claim,))
+            evidence_rows = cur.fetchall()
+
+    # Convert evidence rows into dicts (JSON-friendly)
+    evidence = []
+    for source_name, institution, title, url, published_at in evidence_rows:
+        evidence.append({
             "source_name": source_name,
             "institution": institution,
             "title": title,
             "url": url,
             "published_at": published_at.isoformat() if published_at else None
         })
-    return results
+
+    return {
+        "user_input": user_input,
+        "normalized_input": normalized_input,
+        "match_found": True,
+        "matched_claim": matched_claim,
+        "best_overlap": int(best_overlap),
+        "sources_supporting": int(sources_supporting),
+        "total_sources": int(total_sources),
+        "support_ratio": float(support_ratio),
+        "evidence": evidence
+    }
+
 
 if __name__ == "__main__":
-    # Change this text to whatever the user types in your extension later
-    user_title = "Apple and Goldman Sachs end credit card partnership"
+    print("Interactive search mode")
+    print("Type a headline and press Enter")
+    print("Type 'exit' to quit")
 
-    normalized, rows = search_by_title(user_title, min_overlap=3, limit=10)
+    while True:
+        user_title = input("\nHeadline> ").strip()
 
-    # ✅ Step 3.7 output: structured results
-    structured = rows_to_dicts(rows)
+        if user_title.lower() == "exit":
+            print("Exiting...")
+            break
 
-    print("User input:", user_title)
-    print("Normalized:", normalized)
-    print("\nStructured results (API-ready):")
-    for item in structured:
-        print(item)
+        grouped = search_grouped(user_title, min_overlap=3)
 
-    # --- Optional: keep your old pretty printing (if you still want it) ---
-    # print("\nTop matches:")
-    # for overlap_count, source_name, institution, title, url, published_at in rows:
-    #     print(f"- overlap={overlap_count} | {source_name} | {institution} | {title}")
-    #     print(f"  {url}")
-    #     print(f"  {published_at}\n")
+        print("\nGROUPED RESULT (API-ready):")
+        print(grouped)
