@@ -20,4 +20,11 @@ SOURCES = [
         "symbol": "AAPL",   # used as query keyword (company / ticker)
         "region": "US",
     },
+    {
+        "id": 4,
+        "name": "AlphaVantage",
+        "type": "alphavantage",
+        "symbol": "AAPL",   # ticker for NEWS_SENTIMENT
+        "region": "US",
+    },
 ]
