@@ -1,0 +1,10 @@
+flask
+flask-cors
+python-dotenv
+psycopg2-binary
+sqlalchemy
+numpy
+sentence-transformers
+finnhub-python
+yfinance
+gunicorn
